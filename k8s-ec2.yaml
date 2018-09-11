@@ -1,0 +1,207 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create ec2 for K8S-Testing
+
+Parameters:
+ ImageId:
+  Type: String
+  Default: amdd
+
+ KeyPair:
+  Type: String
+  Default: testing-key-to-be-deleted
+
+ InstanceType:
+  Type: String
+  Default: t2.medium
+  AllowedValues:
+   - t2.nano
+   - t2.micro
+   - t2.medium
+
+ StackRef:
+  Type: String
+  Default: k8s-vpc
+
+ VPC:
+  Type: String
+  Default: k8s-vpc
+
+Mappings:
+ ImageMap:
+  Master:
+   AMI: ami-0e588607d6080ea25
+  Node1:
+   AMI: ami-0e588607d6080ea25
+#  Node2:
+#   AMI: ami-0e588607d6080ea25
+
+Resources:
+ k8sELB:
+  Type: "AWS::ElasticLoadBalancing::LoadBalancer"
+  Properties:
+   SecurityGroups:
+    - !ImportValue k8s-vpc-AccessSg
+   Subnets:
+    - !ImportValue k8s-vpc-PublicSubnetAz2
+   Instances:
+    - Ref: MasterEC2
+   Listeners:
+    - LoadBalancerPort: '80'
+      InstancePort: '8080'
+      Protocol: TCP
+   HealthCheck:
+    Target: 'TCP:8080'
+    HealthyThreshold: '2'
+    UnhealthyThreshold: '5'
+    Interval: '10'
+    Timeout: '5'
+
+ BastionEC2:
+  Type: AWS::EC2::Instance
+  Properties:
+   ImageId: !FindInMap [ ImageMap, Master, AMI ]
+   InstanceType: t2.nano
+   KeyName: !Ref KeyPair
+   NetworkInterfaces:
+    - AssociatePublicIpAddress: True
+      DeviceIndex: 0
+      GroupSet:
+       - !ImportValue k8s-vpc-AccessSg
+      SubnetId: !ImportValue k8s-vpc-PublicSubnetAz1
+   Tags:
+    - Key: Name
+      Value: !Join [ "", [ !Ref "AWS::StackName", "-bastion" ]] 
+   UserData: 
+    Fn::Base64: !Sub |
+     #!/bin/bash
+     echo "Testing Userdata" > /tmp/shiv
+     echo "10.0.20.10 master" >> /etc/hosts
+     echo "10.0.20.11 node-1" >> /etc/hosts
+     echo "10.0.20.12 node-2" >> /etc/hosts
+
+ MasterEC2:
+  Type: AWS::EC2::Instance
+  Properties:
+   ImageId: !FindInMap [ ImageMap, Master, AMI ]
+   InstanceType: t2.micro
+   KeyName: !Ref KeyPair
+   NetworkInterfaces:
+    - PrivateIpAddress: 10.0.20.10
+      DeviceIndex: 0
+      GroupSet:
+       - !ImportValue k8s-vpc-InternalSg
+      SubnetId: !ImportValue k8s-vpc-PrivateSubnetAz2
+   Tags:
+    - Key: Name
+      Value: !Join [ "", [ !Ref "AWS::StackName", "-master" ]] 
+   UserData: 
+    Fn::Base64: !Sub |
+     #!/bin/bash -xe
+     set -euf -o pipefail
+     exec 1> >(logger -s -t $(basename $0)) 2>&1
+     echo "10.0.20.10 master" >> /etc/hosts
+     echo "10.0.20.11 node-1" >> /etc/hosts
+     echo "10.0.20.12 node-2" >> /etc/hosts
+     apt-get update
+     echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+     curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+     apt-get update
+     apt-get -y install docker.io kubectl kubeadm kubelet kubernetes-cni
+     kubeadm init
+     sleep 30
+     mkdir -p /root/.kube
+     cp -i /etc/kubernetes/admin.conf /root/.kube/config
+     chown $(id -u):$(id -g) /root/.kube/config
+     sleep 30
+     kubectl apply -f https://git.io/weave-kube-1.6
+     sleep 30
+     kubectl get pods
+     kubectl get nodes
+
+ Node1:
+  Type: AWS::EC2::Instance
+  Properties:
+   ImageId: !FindInMap [ ImageMap, Node1, AMI ]
+   InstanceType: !Ref InstanceType
+   KeyName: !Ref KeyPair
+   NetworkInterfaces:
+    - PrivateIpAddress: 10.0.20.11
+      DeviceIndex: 0
+      GroupSet:
+       - !ImportValue k8s-vpc-InternalSg
+      SubnetId: !ImportValue k8s-vpc-PrivateSubnetAz2
+   Tags:
+    - Key: Name
+      Value: !Join [ "", [ !Ref "AWS::StackName", "-node-1" ]] 
+   UserData: 
+    Fn::Base64: !Sub |
+     #!/bin/bash -xe
+     set -euf -o pipefail
+     exec 1> >(logger -s -t $(basename $0)) 2>&1
+     echo "10.0.20.10 master" >> /etc/hosts
+     echo "10.0.20.11 node-1" >> /etc/hosts
+     echo "10.0.20.12 node-2" >> /etc/hosts
+     apt-get update
+     echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+     curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+     apt-get update
+     apt-get -y install docker.io kubeadm kubectl kubelet kubernetes-cni
+
+# Node2:
+#  Type: AWS::EC2::Instance
+#  Properties:
+#   ImageId: !FindInMap [ ImageMap, Node1, AMI ]
+#   InstanceType: !Ref InstanceType
+#   KeyName: !Ref KeyPair
+#   NetworkInterfaces:
+#    - PrivateIpAddress: 10.0.20.12
+#      DeviceIndex: 0
+#      GroupSet:
+#       - !ImportValue k8s-vpc-InternalSg
+#      SubnetId: !ImportValue k8s-vpc-PrivateSubnetAz2
+#   Tags:
+#    - Key: Name
+#      Value: !Join [ "", [ !Ref "AWS::StackName", "-node-2" ]] 
+#   UserData: 
+#    Fn::Base64: !Sub |
+#     #!/bin/bash -xe
+#     set -euf -o pipefail
+#     exec 1> >(logger -s -t $(basename $0)) 2>&1
+#     echo "10.0.20.10 master" >> /etc/hosts
+#     echo "10.0.20.11 node-1" >> /etc/hosts
+#     echo "10.0.20.12 node-2" >> /etc/hosts
+#     apt-get update
+#     echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+#     curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+#     apt-get update
+#     apt-get -y install docker.io kubectl kubeadm kubelet kubernetes-cni
+
+Outputs:
+ BastionPrivateIp:
+  Value: !GetAtt BastionEC2.PrivateIp
+  Export:
+   Name: !Join [ "-", [ !Ref "AWS::StackName", BastionPrivateIp ]]
+  Value: !GetAtt BastionEC2.PublicIp
+  Export:
+   Name: !Join [ "-", [ !Ref "AWS::StackName", BastionPublicIp ]]
+
+ MasterPrivateIp:
+  Value: !GetAtt MasterEC2.PrivateIp
+  Export:
+   Name: !Join [ "-", [ !Ref "AWS::StackName", MasterPrivateIp ]]
+
+ Node1PrivateIp:
+  Value: !GetAtt Node1.PrivateIp
+  Export:
+   Name: !Join [ "-", [ !Ref "AWS::StackName", NodePrivateIp ]]
+
+# Node2PrivateIp:
+#  Value: !GetAtt Node2.PrivateIp
+#  Export:
+#   Name: !Join [ "-", [ !Ref "AWS::StackName", Node2PrivateIp ]]
+
+ ElbDNSName:
+  Value: !GetAtt k8sELB.DNSName
+  Export:
+   Name: !Join [ "-", [ !Ref "AWS::StackName", k8sELBDNSName ]]
