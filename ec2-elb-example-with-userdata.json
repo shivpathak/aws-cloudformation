@@ -1,0 +1,366 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "Start presentation layer brick FEs",
+  "Parameters" : {
+    "LbLogsS3BucketName" : {
+      "Type" : "String",
+      "Description" : "Name of S3 bucket to store LB logs"
+    },
+    "RancherInfrastructurestackName" : {
+      "Type" : "String",
+      "Description" : "Stack that creates the Rancher infrastructure components"
+    },
+    "PresentationLayerDesiredCapacity" : {
+      "Type" : "String",
+      "Description" : "How many FE instances should be started in the auto-scaling group"
+    },
+    "PresentationLayerMaximumSize" : {
+      "Type" : "String",
+      "Description" : "Maximum size for the auto-scaling group"
+    },
+    "FeBaseAmi" : {
+      "Type" : "String",
+      "Description" : "AMI to use for the FE launch configuration"
+    },
+    "FeInstanceType" : {
+      "Type" : "String",
+      "Description" : "Instance type to use for the FE launch configuration"
+    },
+    "InstanceKeyName" : {
+      "Type" : "String",
+      "Description" : "Key name to launch instances in the auto-scaling group"
+    },
+    "KubernetesIngressLbUrl" : {
+      "Type" : "String",
+      "Description" : "Kubernetes ingress load-balancer URL, beginning with protocol and ending with slash (e.g. http://preprod-vfstart-k8s-123456789.eu-central-1.elb.amazonaws.com/)"
+    },
+    "HttpsCertificateArn" : {
+      "Type" : "String",
+      "Description" : "Certificate ARN for HTTPS listener on the presentation ALB"
+    }
+  },
+  "Resources" : {
+    "PresentationLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties" : {
+        "IpAddressType" : "ipv4",
+        "LoadBalancerAttributes" : [ {
+          "Key" : "deletion_protection.enabled",
+          "Value" : "true"
+        }, {
+          "Key" : "access_logs.s3.enabled",
+          "Value" : "true"
+        }, {
+          "Key" : "access_logs.s3.bucket",
+          "Value" : {
+            "Ref" : "LbLogsS3BucketName"
+          }
+        }, {
+          "Key" : "access_logs.s3.prefix",
+          "Value" : "presentation"
+        } ],
+        "Scheme" : "internet-facing",
+        "SecurityGroups" : [ {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PresentationLayerSecurityGroup"
+          }
+        } ],
+        "Subnets" : [ {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PublicSubnetAZ1"
+          }
+        }, {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PublicSubnetAZ2"
+          }
+        }, {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PublicSubnetAZ3"
+          }
+        } ],
+        "Tags" : [ {
+          "Key" : "Name",
+          "Value" : "PresentationLayerAlb"
+        } ],
+        "Type" : "application"
+      }
+    },
+    "PresentationLbHttpListener" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties" : {
+        "LoadBalancerArn" : {
+          "Ref" : "PresentationLoadBalancer"
+        },
+        "Protocol" : "HTTP",
+        "Port" : "80",
+        "DefaultActions" : [ {
+          "TargetGroupArn" : {
+            "Ref" : "PresentationHttpTargetGroup"
+          },
+          "Type" : "forward"
+        } ]
+      }
+    },
+    "PresentationLbHttpsListener" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties" : {
+        "LoadBalancerArn" : {
+          "Ref" : "PresentationLoadBalancer"
+        },
+        "Protocol" : "HTTPS",
+        "Port" : "443",
+        "Certificates" : [ {
+          "CertificateArn" : {
+            "Ref" : "HttpsCertificateArn"
+          }
+        } ],
+        "SslPolicy" : "ELBSecurityPolicy-TLS-1-1-2017-01",
+        "DefaultActions" : [ {
+          "TargetGroupArn" : {
+            "Ref" : "PresentationHttpTargetGroup"
+          },
+          "Type" : "forward"
+        } ]
+      }
+    },
+    "PresentationHttpTargetGroup" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties" : {
+        "HealthCheckIntervalSeconds" : "5",
+        "HealthCheckPath" : "/healthcheck.txt",
+        "HealthCheckPort" : "80",
+        "HealthCheckProtocol" : "HTTP",
+        "HealthCheckTimeoutSeconds" : "2",
+        "HealthyThresholdCount" : "5",
+        "Matcher" : {
+          "HttpCode" : "200"
+        },
+        "Name" : "PresentationHttpTargetGroup",
+        "Port" : "80",
+        "Protocol" : "HTTP",
+        "TargetGroupAttributes" : [ {
+          "Key" : "slow_start.duration_seconds",
+          "Value" : "30"
+        }, {
+          "Key" : "stickiness.enabled",
+          "Value" : "true"
+        }, {
+          "Key" : "stickiness.type",
+          "Value" : "lb_cookie"
+        } ],
+        "UnhealthyThresholdCount" : "3",
+        "VpcId" : {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-ClusterVpcId"
+          }
+        }
+      }
+    },
+    "PresentationAutoScalingGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "AutoScalingGroupName" : "PresentationLayerFrontends",
+        "AvailabilityZones" : [ "eu-central-1a", "eu-central-1b", "eu-central-1c" ],
+        "Cooldown" : "300",
+        "DesiredCapacity" : {
+          "Ref" : "PresentationLayerDesiredCapacity"
+        },
+        "HealthCheckGracePeriod" : "60",
+        "HealthCheckType" : "EC2",
+        "LaunchConfigurationName" : {
+          "Ref" : "BrickFeLaunchConfiguration"
+        },
+        "MaxSize" : {
+          "Ref" : "PresentationLayerMaximumSize"
+        },
+        "MetricsCollection" : [ {
+          "Granularity" : "1Minute"
+        } ],
+        "MinSize" : "2",
+        "TargetGroupARNs" : [ {
+          "Ref" : "PresentationHttpTargetGroup"
+        } ],
+        "VPCZoneIdentifier" : [ {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PresentationSubnetAz1"
+          }
+        }, {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PresentationSubnetAz2"
+          }
+        }, {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PresentationSubnetAz3"
+          }
+        } ],
+        "Tags" : [ {
+          "Key" : "Name",
+          "Value" : "PresentationBrickFrontend",
+          "PropagateAtLaunch" : "true"
+        } ]
+      },
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "packages" : {
+              "yum" : {
+                "nginx" : [ ],
+                "logstash" : [ ]
+              }
+            },
+            "groups" : { },
+            "users" : { },
+            "sources" : { },
+            "files" : {
+              "/etc/nginx/nginx.conf" : {
+                "content" : {
+                  "Fn::Join" : [ "\n", [ 
+                    "# For more information on configuration, see http://nginx.org/en/docs/", 
+                    "", 
+                    "user nginx;", 
+                    "worker_processes auto;", 
+                    "error_log /var/log/nginx/error.log debug;", 
+                    "pid /run/nginx.pid;", 
+                    "", 
+                    "events {",
+                    "    worker_connections 1024;", 
+                    "}", 
+                    "", 
+                    "http {", 
+                    "    map $http_x_forwarded_for $client_ip {",
+                    "        default \"\";", 
+                    "        \"~(?<last_proxy>\\d+\\.\\d+\\.\\d+\\.\\d+)$\" $last_proxy;", 
+                    "    }", 
+                    "    log_format  main  '$client_ip - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" \"$http_x_forwarded_for\"';", 
+                    "    access_log  /var/log/nginx/access.log  main;", 
+                    "", 
+                    "    sendfile            on;", 
+                    "    tcp_nopush          on;", 
+                    "    tcp_nodelay         on;", 
+                    "    keepalive_timeout   65;", 
+                    "    types_hash_max_size 2048;", 
+                    "", 
+                    "    include             /etc/nginx/mime.types;", 
+                    "    default_type        application/octet-stream;", 
+                    "    server {", 
+                    "        listen       80 default_server;", 
+                    "        listen       [::]:80 default_server;", 
+                    "        server_name  _;", 
+                    "        root         /usr/share/nginx/html;", 
+                    "", 
+                    "        location /healthcheck.txt {",
+                    "        }", 
+                    "", 
+                    "        location / {", 
+                    "", 
+                    "            proxy_set_header Host $host;", 
+                    "            proxy_set_header x-client-ip $client_ip;", 
+                    "", 
+                    {
+                    "Fn::Sub" : 
+                    "            proxy_pass ${KubernetesIngressLbUrl};"
+                    }, 
+                    "        }", 
+                    "    }", 
+                    "}" ] ]
+                },
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/usr/share/nginx/html/healthcheck.txt" : {
+                "content" : "OK",
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/var/tmp/awslogs-agent-setup.conf" : {
+                "content" : {
+                  "Fn::Join" : [ "\n", [ 
+                    "[general]",
+                    "state_file = /var/awslogs/state/agent-state", 
+                    "" 
+                     ] ]
+                },
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/var/tmp/awslogs-agent-setup.py" : {
+                  "source" : "https://s3.amazonaws.com//aws-cloudwatch/downloads/latest/awslogs-agent-setup.py",
+                  "mode" : "000750",
+                  "owner" : "root",
+                  "group" : "root"
+              }
+            },
+            "commands" : {
+              "awslogs":{
+                "cwd": "/var/tmp",
+                "command": {"Fn::Sub": "/var/tmp/awslogs-agent-setup.py -n -r ${AWS::Region} -c /var/tmp/awslogs-agent-setup.conf"} 
+              }
+            },
+            "services" : {
+              "sysvinit" : {
+                "nginx" : {
+                  "enabled" : "true",
+                  "ensureRunning" : "true",
+                  "files" : [ "/etc/nginx/nginx.conf" ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "BrickFeLaunchConfiguration" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Properties" : {
+        "AssociatePublicIpAddress" : "false",
+        "ImageId" : {
+          "Ref" : "FeBaseAmi"
+        },
+        "InstanceMonitoring" : "true",
+        "InstanceType" : {
+          "Ref" : "FeInstanceType"
+        },
+        "KeyName" : {
+          "Ref" : "InstanceKeyName"
+        },
+        "SecurityGroups" : [ {
+          "Fn::ImportValue" : {
+            "Fn::Sub" : "${RancherInfrastructurestackName}-PresentationLayerSecurityGroup"
+          }
+        } ],
+        "UserData" : {
+          "Fn::Base64" : {
+            "Fn::Join" : [ "", [ 
+              "#cloud-config\n",
+              "bootcmd:\n",
+              "  - /bin/yum install -y epel-release\n",
+              "yum_repos:\n",
+              "  logstash:\n",
+              "    name: Elastic repository for 6.x packages\n",
+              "    baseurl: https://artifacts.elastic.co/packages/6.x/yum\n",
+              "    gpgcheck: true\n",
+              "    gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch\n",
+              "    enabled: true\n",
+              "    autorefresh: true\n",
+              "    type: rpm-md\n",
+              "runcmd:\n",
+              "  - /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz\n", 
+              "  - /opt/aws/bin/cfn-init -v --stack ", 
+              {
+                "Ref" : "AWS::StackName"
+              }, 
+              " --resource PresentationAutoScalingGroup --region ", 
+              {
+                "Ref" : "AWS::Region"
+              }, "\n"
+            ]
+			  ]
+			}
+        }
+      }
+    }
+  }
+}
